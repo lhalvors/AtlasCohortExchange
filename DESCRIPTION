@@ -1,0 +1,19 @@
+Package: AtlasCohortExchange
+Type: Package
+Title: Package to Exchange Cohort inclusion results with External Sites
+Version: 0.2.0
+Author: Lars Halvorsen
+Maintainer: Lars Halvorsen <lhalvors@its.jnj.com>
+Description: The package allows the export of cohort inclusion results 
+    from one (remote) Atlas instance, and the import of these results 
+    into another (central) instance.
+Depends:
+    RPostgreSQL,
+    RSQLServer,
+    DBI,
+    jsonlite,
+    readr
+License: Apache License
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 6.0.1
