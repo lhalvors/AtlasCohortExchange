@@ -180,6 +180,111 @@ insertCohortResultRecords <- function(connectionParameters, cohortID, jsonResult
   dbUnloadDriver(drv)
 }
 
+#' insertCohortDefinition
+#'
+#' @details
+#' Inserts the cohort definition records from the provided JSON file into the relevant tables.
+#'
+#' @param connectionParameters  a string JSON object containing details for connecting to the database
+#' @param jsonPath              the path to a JSON file containing the cohort definition - if empty, prompts for file
+#'
+#' @export
+
+insertCohortDefinition <- function(connectionParameters, jsonPath = NA) {
+  # extract the parameters
+  axParams <- fromJSON(connectionParameters)
+  axDbms = axParams[["dbms"]]
+  axHost = axParams[["server"]]
+  axDBname = axParams[["dbname"]]
+  axDBsourceSchema = axParams[["sourceschema"]]
+  axDBtargetSchema = axParams[["targetschema"]]
+  axUser = axParams[["user"]]
+  axPassword = axParams[["password"]]
+  axDBport = 0
+
+  switch (axDbms,
+          postgresql = {
+            # append database name to connection string for PostgreSQL instance
+            # axHost <- paste(axHost,'/',axDBname)
+
+            # load the PostgreSQL driver
+            drv <- dbDriver("PostgreSQL")
+
+            axDBport = 5432
+
+            # create a connection to the database
+            con <- dbConnect(drv, dbname = axDBname, host = axHost, port = axDBport, user = axUser, password = axPassword)
+          },
+          sqlserver = {
+            drv <- dbDriver("SQLServer")
+
+            axDBport = 1433
+            # create a connection to the database
+            con <- dbConnect(drv, server = axHost, properties=list(user=axUser, password=axPassword))
+          },
+          stop("Unknown database type.")
+  )
+
+  # check if file path specified, prompt for file if not
+  if (is.na(jsonPath) || jsonPath == "") {
+    jsonPath <- file.choose()
+  }
+
+  # load json data into data fram
+  df_json_data<-fromJSON(jsonPath)
+
+  # split into 2 separate data frames for cohort_definition and cohort_definition_details
+  df_cohort_definition<-data.frame(df_json_data[1,1])
+  colnames(df_cohort_definition) <- c("id","name","description","expression_type","created_by","created_date","modified_by","modified_date")
+  df_cohort_definition<-transform(df_cohort_definition, id=as.numeric(id),name=as.character(name),description=as.character(description),expression_type=as.character(expression_type),created_by=as.character(created_by),created_date=as.Date.character(created_date),modified_by=as.character(modified_by),modified_date=as.Date.character(modified_date))
+
+  df_cohort_definition_details<-data.frame(df_json_data[2,2])
+  colnames(df_cohort_definition_details) <- c("id","expression")
+  df_cohort_definition_details<-transform(df_cohort_definition_details, id=as.numeric(id),expression=as.character(expression))
+
+  # save source cohort ID
+  sourceCohortId <- df_cohort_definition$id[[1]]
+
+  # depending on database, need to either null out the id, or set it to the next id available
+  switch (axDbms,
+          postgresql = {
+            max_cohort_def_id<-dbGetQuery(con,
+                                                 paste(gsub("@target_database_schema",axDBtargetSchema,
+                                                            "select max(id)
+                                                            from @target_database_schema.cohort_definition;"), sep="")
+                                                 )
+            df_cohort_definition$id[[1]] <- max_cohort_def_id[[1]] + 1
+          },
+          sqlserver = {
+            df_cohort_definition$id[[1]] <- NA
+          },
+          stop("Unknown database type.")
+  )
+
+  # write the cohort_definition record
+  dbWriteTable(con, c(axDBtargetSchema,"cohort_definition"), df_cohort_definition, append=TRUE, row.names=FALSE)
+
+  # obtain the new cohort_definition_id
+  db_res <-dbGetQuery(con,
+                          paste(gsub("@target_database_schema",axDBtargetSchema,
+                                     "select max(id)
+                                      from @target_database_schema.cohort_definition;"), sep=""))
+
+  new_cohort_definition_id <- db_res[[1]]
+
+  # update the cohort_definition_id reference for cohort_definition_details
+  df_cohort_definition_details$id[df_cohort_definition_details$id != new_cohort_definition_id] <- new_cohort_definition_id
+
+  # write the cohort_definition_details record(s)
+  dbWriteTable(con, c(axDBtargetSchema,"cohort_definition_details"), df_cohort_definition_details, append=TRUE, row.names=FALSE)
+
+  print(paste("Inserted cohort definition - source cohort ID:", sourceCohortId, ", local cohort ID:", new_cohort_definition_id, sep=""))
+
+  # disconnect and unload
+  dbDisconnect(con)
+  dbUnloadDriver(drv)
+}
+
 
 #' getCohortResults
 #'
@@ -228,20 +333,32 @@ getCohortResults <- function(connectionParameters, cohortID) {
   )
 
   cohortID_str<-as.character(cohortID)
+
   # execute SQL queries to retrieve the resulting records, replacing the parameters
+  cohort_data<-dbGetQuery(con,
+  paste(gsub("@target_database_schema",axDBtargetSchema,
+    gsub("@target_cohort_id", cohortID_str,"
+      select cohort_definition_id,
+      subject_id,
+      cohort_start_date,
+      cohort_end_date
+      from @target_database_schema.cohort
+      where cohort_definition_id=@target_cohort_id;")), sep="")
+  )
+
   cohort_def_data<-dbGetQuery(con,
-    paste(gsub("@target_database_schema",axDBtargetSchema,
-      gsub("@target_cohort_id", cohortID_str,"
-        select id,
-        name,
-        description,
-        expression_type,
-        created_by,
-        created_date,
-        modified_by,
-        modified_date
-        from @target_database_schema.cohort_definition
-        where id=@target_cohort_id;")), sep="")
+  paste(gsub("@target_database_schema",axDBtargetSchema,
+    gsub("@target_cohort_id", cohortID_str,"
+      select id,
+      name,
+      description,
+      expression_type,
+      created_by,
+      created_date,
+      modified_by,
+      modified_date
+      from @target_database_schema.cohort_definition
+      where id=@target_cohort_id;")), sep="")
   )
 
   cohort_def_details_data<-dbGetQuery(con,
@@ -296,7 +413,8 @@ getCohortResults <- function(connectionParameters, cohortID) {
   dbDisconnect(con)
   dbUnloadDriver(drv)
 
-  resultsJSON<- paste("{\"cohort_definition\": ", toJSON(cohort_def_data, null='list', na='null'),",",
+  resultsJSON<- paste("{\"cohort\": ", toJSON(cohort_data, null='list', na='null'),",",
+                      "\"cohort_definition\":", toJSON(cohort_def_data, null='list', na='null'), ",",
                       "\"cohort_definition_details\":", toJSON(cohort_def_details_data, null='list', na='null'), ",",
                       "\"cohort_inclusion\": ", toJSON(cohort_inc_data, null='list', na='null'), ",",
                       "\"cohort_inclusion_result\": ", toJSON(cohort_inc_result_data, null='list', na='null'), ",",
@@ -332,6 +450,40 @@ exportCohortResults <- function(connectionParameters, outFilePath) {
     write(cohortResults, outFilePath)
   }
 }
+
+#' exportS3CohortResults
+#'
+#' @details
+#' Extracts the cohort_inclusion, cohort_inclusion_result, cohort_inclusion_stats,
+#' and cohort_summary_stats records for a cohort definition.
+#' Saves the resulting cohort result records as a JSON file in the specified S3 bucket.
+#' Export file is named 'cohort_incl_res_xx.json', where xx is the local cohort ID.
+#'
+#' @param connectionParameters  a string JSON object containing details for connecting to the database.
+#' @param bucketName            name of the bucket on S3 where to save the cohort inclusion report result file.
+#' @param s3keys                file path to the csv file with the S3 access keys
+#'
+#' @export
+
+exportS3CohortResults <- function(connectionParameters, bucketName, s3keys) {
+  # Get the cohort ID from the user
+  cohortId <- readinteger("Please enter the cohort ID [integer]:")
+
+  # Get S3 keys
+  s3_file<-read.csv(s3keys)
+
+  # Execute a set of SQL scripts and get resulting cohort records in a JSON string
+  cohortResults <-
+    getCohortResults(connectionParameters, cohortID = cohortId)
+
+  if (!is.na(cohortResults)) {
+    # Write the resulting cohort records to a JSON file
+    temp_file <- rawConnection(raw(0), "r+")
+    write(cohortResults, temp_file)
+    put_object(file = rawConnectionValue(temp_file), object = paste0("cohort_incl_res_",cohortId,".json"), bucket = bucketName,s3_file$User_name, key = s3_file$Access.key.ID,secret = s3_file$Secret.access.key, region="eu-west-1")
+  }
+}
+
 
 #' importCohortResults
 #'
