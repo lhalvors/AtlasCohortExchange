@@ -204,9 +204,6 @@ insertCohortDefinition <- function(connectionParameters, jsonPath = NA) {
 
   switch (axDbms,
           postgresql = {
-            # append database name to connection string for PostgreSQL instance
-            # axHost <- paste(axHost,'/',axDBname)
-
             # load the PostgreSQL driver
             drv <- dbDriver("PostgreSQL")
 
@@ -236,11 +233,21 @@ insertCohortDefinition <- function(connectionParameters, jsonPath = NA) {
   # split into 2 separate data frames for cohort_definition and cohort_definition_details
   df_cohort_definition<-data.frame(df_json_data[1,1])
   colnames(df_cohort_definition) <- c("id","name","description","expression_type","created_by","created_date","modified_by","modified_date")
-  df_cohort_definition<-transform(df_cohort_definition, id=as.numeric(id),name=as.character(name),description=as.character(description),expression_type=as.character(expression_type),created_by=as.character(created_by),created_date=as.Date.character(created_date),modified_by=as.character(modified_by),modified_date=as.Date.character(modified_date))
+  df_cohort_definition<-transform(df_cohort_definition,
+                                  id=ifelse(!is.na(id), as.numeric(id), NA),
+                                  name=ifelse(!is.na(name), as.character(name), NA),
+                                  description=ifelse(!is.na(description),as.character(description), NA),
+                                  expression_type=ifelse(!is.na(expression_type), as.character(expression_type), NA),
+                                  created_by=ifelse(!is.na(created_by),as.character(created_by), NA),
+                                  created_date=as.Date.character(created_date),
+                                  modified_by=ifelse(!is.na(modified_by),as.character(modified_by),NA),
+                                  modified_date=as.Date.character(modified_date))
 
   df_cohort_definition_details<-data.frame(df_json_data[2,2])
   colnames(df_cohort_definition_details) <- c("id","expression")
-  df_cohort_definition_details<-transform(df_cohort_definition_details, id=as.numeric(id),expression=as.character(expression))
+  df_cohort_definition_details<-transform(df_cohort_definition_details,
+                                          id=ifelse(!is.na(id), as.numeric(id), NA),
+                                          expression=ifelse(!is.na(expression),as.character(expression),NA))
 
   # save source cohort ID
   sourceCohortId <- df_cohort_definition$id[[1]]
@@ -248,37 +255,84 @@ insertCohortDefinition <- function(connectionParameters, jsonPath = NA) {
   # depending on database, need to either null out the id, or set it to the next id available
   switch (axDbms,
           postgresql = {
+            sqlStr<-"insert into @target_database_schema.cohort_definition(id,name,description,expression_type,created_by,created_date,modified_by,modified_date) values ("
             max_cohort_def_id<-dbGetQuery(con,
                                                  paste(gsub("@target_database_schema",axDBtargetSchema,
                                                             "select max(id)
                                                             from @target_database_schema.cohort_definition;"), sep="")
                                                  )
             df_cohort_definition$id[[1]] <- max_cohort_def_id[[1]] + 1
+            sqlStr<-paste(sqlStr,df_cohort_definition$id[[1]],",",sep="")
           },
           sqlserver = {
+            sqlStr<-"insert into @target_database_schema.cohort_definition(name,description,expression_type,created_by,created_date,modified_by,modified_date) values ("
             df_cohort_definition$id[[1]] <- NA
           },
           stop("Unknown database type.")
   )
 
+  # complete the value part of the sql string
+  if (is.na(df_cohort_definition$name)) { sqlStr<-paste(sqlStr,"null,",sep="") }
+  else { sqlStr<-paste(sqlStr,"'",df_cohort_definition$name[[1]],"',",sep="") }
+
+  if (is.na(df_cohort_definition$description)) { sqlStr<-paste(sqlStr,"null,",sep="") }
+  else { sqlStr<-paste(sqlStr,"'",df_cohort_definition$description[[1]],"',",sep="") }
+
+  if (is.na(df_cohort_definition$expression_type)) { sqlStr<-paste(sqlStr,"null,",sep="") }
+  else { sqlStr<-paste(sqlStr,"'",df_cohort_definition$expression_type[[1]],"',",sep="") }
+
+  if (is.na(df_cohort_definition$created_by)) { sqlStr<-paste(sqlStr,"null,",sep="") }
+  else { sqlStr<-paste(sqlStr,"'",df_cohort_definition$created_by[[1]],"',",sep="") }
+
+  if (is.na(df_cohort_definition$created_date)) { sqlStr<-paste(sqlStr,"null,",sep="") }
+  else { sqlStr<-paste(sqlStr,"'",df_cohort_definition$created_date[[1]],"',",sep="") }
+
+  if (is.na(df_cohort_definition$modified_by)) { sqlStr<-paste(sqlStr,"null,",sep="") }
+  else { sqlStr<-paste(sqlStr,"'",df_cohort_definition$modified_by[[1]],"',",sep="") }
+
+  if (is.na(df_cohort_definition$modified_date)) { sqlStr<-paste(sqlStr,"null);",sep="") }
+  else { sqlStr<-paste(sqlStr,"'",df_cohort_definition$modified_date[[1]],"');",sep="") }
+
+  # open a transaction
+  dbBegin(con)
+
   # write the cohort_definition record
-  dbWriteTable(con, c(axDBtargetSchema,"cohort_definition"), df_cohort_definition, append=TRUE, row.names=FALSE)
+  #dbWriteTable(con, c("webapi","dbo", "cohort_definition"), df_cohort_definition, append=TRUE, row.names=FALSE)
+  rcnt<-dbExecute(con, paste(gsub("@target_database_schema",axDBtargetSchema,sqlStr),sep=""))
 
-  # obtain the new cohort_definition_id
-  db_res <-dbGetQuery(con,
-                          paste(gsub("@target_database_schema",axDBtargetSchema,
-                                     "select max(id)
-                                      from @target_database_schema.cohort_definition;"), sep=""))
+  if (rcnt > 0) {
 
-  new_cohort_definition_id <- db_res[[1]]
+    # obtain the new cohort_definition_id
+    db_res <-dbGetQuery(con,
+                            paste(gsub("@target_database_schema",axDBtargetSchema,
+                                       "select max(id)
+                                        from @target_database_schema.cohort_definition;"), sep=""))
 
-  # update the cohort_definition_id reference for cohort_definition_details
-  df_cohort_definition_details$id[df_cohort_definition_details$id != new_cohort_definition_id] <- new_cohort_definition_id
+    new_cohort_definition_id <- db_res[[1]]
 
-  # write the cohort_definition_details record(s)
-  dbWriteTable(con, c(axDBtargetSchema,"cohort_definition_details"), df_cohort_definition_details, append=TRUE, row.names=FALSE)
+    # update the cohort_definition_id reference for cohort_definition_details
+    df_cohort_definition_details$id[df_cohort_definition_details$id != new_cohort_definition_id] <- new_cohort_definition_id
 
-  print(paste("Inserted cohort definition - source cohort ID:", sourceCohortId, ", local cohort ID:", new_cohort_definition_id, sep=""))
+    # create sql statement for inserting cohort_definition_details record
+    sqlStr<-"insert into @target_database_schema.cohort_definition_details(id,expression) values ("
+    sqlStr<-paste(sqlStr, new_cohort_definition_id, ",",sep="")
+    sqlStr<-paste(sqlStr, "'", df_cohort_definition_details$expression[[1]],"');",sep="")
+
+    # write the cohort_definition_details record(s)
+    #dbWriteTable(con, c(axDBtargetSchema,"cohort_definition_details"), df_cohort_definition_details, append=TRUE, row.names=FALSE)
+    rcnt<-dbExecute(con, paste(gsub("@target_database_schema",axDBtargetSchema,sqlStr),sep=""))
+
+    if (rcnt > 0) {
+
+      dbCommit(con)
+      print(paste("Inserted cohort definition - source cohort ID:", sourceCohortId, ", local cohort ID:", new_cohort_definition_id, sep=""))
+
+    } else { # dbExecute failed - print message (dbDisconnect will cancel the transaction)
+      print(paste("ERROR: failed to insert cohort definition details - source cohort ID:", sourceCohortId, sep=""))
+    }
+  } else { # dbExecute failed - print message (dbDisconnect will cancel the transaction)
+    print(paste("ERROR: failed to insert cohort definition - source cohort ID:", sourceCohortId, sep=""))
+  }
 
   # disconnect and unload
   dbDisconnect(con)
